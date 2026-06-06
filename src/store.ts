@@ -951,12 +951,13 @@ export class ContentStore {
     source: string,
     linesPerChunk: number = 20,
     attribution?: { sessionId?: string; eventId?: string },
+    maxChunkBytes: number = MAX_CHUNK_BYTES,
   ): IndexResult {
     if (!content || content.trim().length === 0) {
       return this.#insertChunks([], source, "", undefined, undefined, attribution);
     }
 
-    const chunks = this.#chunkPlainText(content, linesPerChunk);
+    const chunks = this.#chunkPlainText(content, linesPerChunk, maxChunkBytes);
 
     return withRetry(() => this.#insertChunks(
       chunks.map((c) => ({ ...c, hasCode: false })),
@@ -984,21 +985,21 @@ export class ContentStore {
     attribution?: { sessionId?: string; eventId?: string },
   ): IndexResult {
     if (!content || content.trim().length === 0) {
-      return this.indexPlainText("", source, undefined, attribution);
+      return this.indexPlainText("", source, undefined, attribution, maxChunkBytes);
     }
 
     let parsed: unknown;
     try {
       parsed = JSON.parse(content);
     } catch {
-      return this.indexPlainText(content, source, undefined, attribution);
+      return this.indexPlainText(content, source, undefined, attribution, maxChunkBytes);
     }
 
     const chunks: Chunk[] = [];
     this.#walkJSON(parsed, [], chunks, maxChunkBytes);
 
     if (chunks.length === 0) {
-      return this.indexPlainText(content, source, undefined, attribution);
+      return this.indexPlainText(content, source, undefined, attribution, maxChunkBytes);
     }
 
     return withRetry(() => this.#insertChunks(chunks, source, content, undefined, undefined, attribution));
@@ -1744,9 +1745,78 @@ export class ContentStore {
     return chunks;
   }
 
+  /**
+   * Split a single oversized plain-text chunk into byte-capped sub-chunks
+   * by accumulating lines until the byte count would exceed maxChunkBytes.
+   * Falls back to character-based splitting for extremely long single lines.
+   */
+  #splitOversizedPlainChunk(
+    lines: string[],
+    titlePrefix: string,
+    maxChunkBytes: number,
+  ): Array<{ title: string; content: string }> {
+    const subChunks: Array<{ title: string; content: string }> = [];
+    let accumulator: string[] = [];
+    let partIndex = 1;
+
+    const flushAccumulator = () => {
+      if (accumulator.length === 0) return;
+      const content = accumulator.join("\n");
+      const partTitle = partIndex === 1 ? titlePrefix : `${titlePrefix} (${partIndex})`;
+      subChunks.push({ title: partTitle, content });
+      partIndex++;
+      accumulator = [];
+    };
+
+    for (const line of lines) {
+      // If a single line itself exceeds the cap (even as first line),
+      // split it by character before accumulating
+      if (Buffer.byteLength(line) > maxChunkBytes) {
+        flushAccumulator();
+        // Split the long line into byte-capped pieces
+        let remaining = line;
+        let linePart = 1;
+        while (remaining.length > 0) {
+          // Find a split point within maxChunkBytes, preferring whitespace boundaries
+          let slice = remaining.slice(0, maxChunkBytes);
+          // Try to break at a space near the end for readability
+          if (remaining.length > maxChunkBytes) {
+            const lastSpace = slice.lastIndexOf(" ");
+            const lastNewline = slice.lastIndexOf("\n");
+            const breakPoint = Math.max(lastSpace, lastNewline);
+            if (breakPoint > maxChunkBytes * 0.5) {
+              slice = remaining.slice(0, breakPoint);
+            }
+          }
+          const linePartTitle = partIndex === 1 && linePart === 1
+            ? titlePrefix
+            : `${titlePrefix} (${partIndex}.${linePart})`;
+          subChunks.push({ title: linePartTitle, content: slice });
+          remaining = remaining.slice(slice.length);
+          linePart++;
+          partIndex++;
+        }
+        continue;
+      }
+
+      const candidate = accumulator.length > 0
+        ? accumulator.join("\n") + "\n" + line
+        : line;
+
+      // If adding this line would exceed the cap, flush accumulator first
+      if (Buffer.byteLength(candidate) > maxChunkBytes && accumulator.length > 0) {
+        flushAccumulator();
+      }
+      accumulator.push(line);
+    }
+    flushAccumulator();
+    return subChunks;
+  }
+
   #chunkPlainText(
     text: string,
     linesPerChunk: number,
+    maxChunkBytes: number = MAX_CHUNK_BYTES,
   ): Array<{ title: string; content: string }> {
     // Try blank-line splitting first for naturally-sectioned output
     const sections = text.split(/\n\s*\n/);
@@ -1769,9 +1839,12 @@ export class ContentStore {
 
     const lines = text.split("\n");
 
-    // Small enough for a single chunk
+    // Small enough for a single chunk — but still enforce byte cap
     if (lines.length <= linesPerChunk) {
-      return [{ title: "Output", content: text }];
+      if (Buffer.byteLength(text) <= maxChunkBytes) {
+        return [{ title: "Output", content: text }];
+      }
+      return this.#splitOversizedPlainChunk(lines, "Output", maxChunkBytes);
     }
 
     // Fixed-size line groups with 2-line overlap
@@ -1785,10 +1858,22 @@ export class ContentStore {
       const startLine = i + 1;
       const endLine = Math.min(i + slice.length, lines.length);
       const firstLine = slice[0]?.trim().slice(0, 80);
-      chunks.push({
-        title: firstLine || `Lines ${startLine}-${endLine}`,
-        content: slice.join("\n"),
-      });
+      const joined = slice.join("\n");
+
+      // Enforce byte cap: sub-split oversized line-group chunks
+      if (Buffer.byteLength(joined) <= maxChunkBytes) {
+        chunks.push({
+          title: firstLine || `Lines ${startLine}-${endLine}`,
+          content: joined,
+        });
+      } else {
+        const subChunks = this.#splitOversizedPlainChunk(
+          slice,
+          firstLine || `Lines ${startLine}-${endLine}`,
+          maxChunkBytes,
+        );
+        chunks.push(...subChunks);
+      }
     }
 
     return chunks;
