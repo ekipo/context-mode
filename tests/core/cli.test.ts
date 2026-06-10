@@ -3534,7 +3534,10 @@ describe("installed_plugins.json installPath containment", () => {
       // Verification 2 — FIXED behaviour (canonical cacheRoot):
       // After canonicalizing cacheRoot via realpathSync, the physical
       // installPath does start with the canonical prefix.
-      const canonicalPasses = resolve(physicalInstallPath).startsWith(canonicalCacheRootWithSep);
+      // realpathSync is used on both sides because on macOS /var is itself a
+      // symlink to /private/var — resolve() alone stays on the non-canonical
+      // side and fails the startsWith check.
+      const canonicalPasses = fs.realpathSync(resolve(physicalInstallPath)).startsWith(canonicalCacheRootWithSep);
       expect(canonicalPasses).toBe(true); // GREEN: heal proceeds
     } finally {
       rmSync(sandbox, { recursive: true, force: true });
