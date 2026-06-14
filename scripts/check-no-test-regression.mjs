@@ -33,6 +33,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
+// Test identities must be byte-identical across OSes so a baseline captured on
+// one platform compares cleanly on another (and on CI). `path.relative` emits
+// the native separator — `\` on Windows — so normalise to POSIX `/` always.
+const POSIX_SEP = "/";
+const WINDOWS_SEP = "\\";
 const BASELINE_FILE = join(ROOT, ".test-baseline.json");
 const RESULT_FILE = join(ROOT, ".vitest-result.json");
 
@@ -71,8 +76,9 @@ export function parseVitestJson(jsonText) {
   const failedIds = [];
   for (const file of report.testResults) {
     // `file.name` is an absolute path; relativise so baselines stay comparable
-    // across machines and checkouts.
-    const fileId = relative(ROOT, file.name ?? "");
+    // across machines and checkouts, then force POSIX separators so the
+    // identity is identical on Windows and *nix.
+    const fileId = relative(ROOT, file.name ?? "").split(WINDOWS_SEP).join(POSIX_SEP);
     for (const assertion of file.assertionResults ?? []) {
       if (assertion.status === "failed") {
         failedIds.push(`${fileId} > ${assertion.fullName ?? assertion.title}`);

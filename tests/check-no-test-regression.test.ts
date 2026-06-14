@@ -35,6 +35,18 @@ describe("parseVitestJson", () => {
     expect(parsed.failedIds).toEqual(["tests/a.test.ts > does Y"]);
   });
 
+  it("normalises Windows path separators so identities match the *nix baseline (#804)", () => {
+    // On Windows `path.relative` returns `tests\\a.test.ts` (backslashes),
+    // which made `failedIds` differ from a Linux/macOS baseline and broke the
+    // Windows CI job. Feeding a backslash-laden file name reproduces that
+    // identity on any OS — the parser must emit forward slashes regardless.
+    const parsed = parseVitestJson(
+      report([{ file: "tests\\adapters\\a.test.ts", name: "does Y", status: "failed" }]),
+    );
+    expect(parsed).not.toBeNull();
+    expect(parsed.failedIds).toEqual(["tests/adapters/a.test.ts > does Y"]);
+  });
+
   it("returns null on non-JSON / malformed input (runner crash → exit 3)", () => {
     // The previous text-regex parser returned null on ANSI-coloured vitest
     // summaries; consuming the JSON report removes that whole failure class.
