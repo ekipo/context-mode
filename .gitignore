@@ -36,3 +36,4 @@ context-mode-guidance-*/
 /.cocoindex_code/
 /.kilo/
 .test-baseline.json
+.vitest-result.json
