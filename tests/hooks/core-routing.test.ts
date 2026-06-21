@@ -34,7 +34,7 @@ let routePreToolUse: (
   additionalContext?: string;
 } | null;
 
-let resetGuidanceThrottle: () => void;
+let resetGuidanceThrottle: (sessionId?: string) => void;
 let initSecurity: (buildDir: string) => Promise<boolean>;
 let ROUTING_BLOCK: string;
 let createRoutingBlock: (t: any, options?: { includeCommands?: boolean; toolSearchBootstrap?: boolean }) => string;
@@ -102,6 +102,21 @@ describe("routePreToolUse", () => {
         undefined,
         "codex",
         "codex-cmd-curl",
+      );
+      expect(result).not.toBeNull();
+      expect(result!.action).toBe("modify");
+      expect((result!.updatedInput as Record<string, string>).command).toContain(
+        "curl/wget redirected",
+      );
+    });
+
+    it("denies agy run_command CommandLine payloads like Bash command payloads", () => {
+      const result = routePreToolUse(
+        "run_command",
+        { CommandLine: "curl https://example.com" },
+        undefined,
+        "antigravity-cli",
+        "agy-commandline-curl",
       );
       expect(result).not.toBeNull();
       expect(result!.action).toBe("modify");
@@ -323,6 +338,20 @@ describe("routePreToolUse", () => {
       expect(result!.action).toBe("context");
       expect(result!.additionalContext).toBe(READ_GUIDANCE);
     });
+
+    it("treats agy view_file AbsolutePath payloads as Read", () => {
+      resetGuidanceThrottle("agy-view-file");
+      const result = routePreToolUse(
+        "view_file",
+        { AbsolutePath: "/some/file.ts" },
+        undefined,
+        "antigravity-cli",
+        "agy-view-file",
+      );
+      expect(result).not.toBeNull();
+      expect(result!.action).toBe("context");
+      expect(result!.additionalContext).toContain("ctx_execute_file");
+    });
   });
 
   // ─── Grep routing ──────────────────────────────────────
@@ -363,6 +392,23 @@ describe("routePreToolUse", () => {
       const result = routePreToolUse("WebFetch", { url });
       expect(result).not.toBeNull();
       expect(result!.reason).toContain(url);
+    });
+
+    it("treats agy read_url_content URL payloads as WebFetch", () => {
+      const url = "https://example.com/docs";
+      const result = routePreToolUse(
+        "read_url_content",
+        { URL: url },
+        undefined,
+        "antigravity-cli",
+        "agy-read-url",
+      );
+      expect(result).not.toBeNull();
+      expect(result!.action).toBe("deny");
+      expect(result!.reason).toContain(url);
+      // agy's call surface is context-mode/<tool> (see hooks/core/tool-naming.mjs),
+      // not Claude's mcp__context-mode__<tool> form.
+      expect(result!.reason).toContain("context-mode/ctx_fetch_and_index");
     });
 
     it("treats mcp_web_fetch as WebFetch and blocks it", () => {

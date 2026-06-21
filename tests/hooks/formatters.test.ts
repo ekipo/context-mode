@@ -8,6 +8,8 @@ let cursorFormat: (decision: unknown) => unknown;
 // Kimi has no standalone formatter — same convention as codex; the only
 // source of truth is the central registry in hooks/core/formatters.mjs.
 let kimiFormat: (decision: unknown) => unknown;
+// agy has no standalone formatter either — same central-registry convention.
+let agyFormat: (decision: unknown) => unknown;
 
 beforeAll(async () => {
   const ccMod = await import("../../hooks/formatters/claude-code.mjs");
@@ -25,6 +27,8 @@ beforeAll(async () => {
   const coreMod = await import("../../hooks/core/formatters.mjs");
   kimiFormat = (decision: unknown) =>
     coreMod.formatDecision("kimi", decision as { action: string } | null);
+  agyFormat = (decision: unknown) =>
+    coreMod.formatDecision("antigravity-cli", decision as { action: string } | null);
 });
 
 // ─── Shared test decisions ───────────────────────────────
@@ -315,6 +319,47 @@ describe("formatDecision", () => {
     it("returns null for null decision", () => {
       const result = kimiFormat(null);
       expect(result).toBeNull();
+    });
+  });
+
+  // ─── Antigravity CLI (agy) formatter ───────────────────
+  // agy honors a NATIVE top-level decision contract {decision:"deny"|"ask",reason}
+  // (not Claude's hookSpecificOutput) and ignores PreToolUse additionalContext —
+  // so context/modify collapse to an enforceable deny.
+  describe("antigravity-cli formatter", () => {
+    it("formats deny as a top-level {decision:'deny',reason}", () => {
+      expect(agyFormat(denyDecision)).toEqual({ decision: "deny", reason: denyDecision.reason });
+    });
+
+    it("formats ask with a fallback reason when the decision carries none", () => {
+      expect(agyFormat(askDecision)).toEqual({ decision: "ask", reason: "Action requires user confirmation" });
+    });
+
+    it("formats ask with its own reason when present", () => {
+      expect(agyFormat({ action: "ask", reason: "confirm first" })).toEqual({ decision: "ask", reason: "confirm first" });
+    });
+
+    it("collapses modify to a deny that surfaces the routing guidance from the echo payload", () => {
+      const result = agyFormat(modifyDecision) as Record<string, unknown>;
+      expect(result.decision).toBe("deny");
+      // Per-tool guidance surfaced verbatim, not a generic line.
+      expect(String(result.reason)).toContain("context-mode: curl/wget blocked");
+    });
+
+    it("falls back to a generic redirect when the modify command is not an echo payload", () => {
+      const result = agyFormat({ action: "modify", updatedInput: { command: "weird shape" } }) as Record<string, unknown>;
+      expect(result.decision).toBe("deny");
+      expect(String(result.reason)).toContain("context-mode: redirected");
+    });
+
+    it("collapses context to a deny (agy ignores PreToolUse additionalContext)", () => {
+      const result = agyFormat(contextDecision) as Record<string, unknown>;
+      expect(result.decision).toBe("deny");
+      expect(String(result.reason)).toContain("execute_file");
+    });
+
+    it("returns null for a null decision", () => {
+      expect(agyFormat(null)).toBeNull();
     });
   });
 });

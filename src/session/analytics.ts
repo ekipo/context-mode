@@ -618,7 +618,7 @@ export interface AdapterDirEntry {
  * so a single call surfaces "your work everywhere on this machine across
  * all AI tools" (the marketing line).
  *
- * Returns ALL 15 adapters even when the dir doesn't exist on disk — the
+ * Returns ALL 17 adapters even when the dir doesn't exist on disk — the
  * scanner functions filter to existing dirs. That keeps the enumeration
  * pure / testable without filesystem dependencies.
  */
@@ -629,10 +629,12 @@ export function enumerateAdapterDirs(opts?: { home?: string }): AdapterDirEntry[
     ["claude-code",      [".claude"]],
     ["gemini-cli",       [".gemini"]],
     ["antigravity",      [".gemini"]],
+    ["antigravity-cli",  [".gemini"]],
     ["openclaw",         [".openclaw"]],
     ["codex",            [".codex"]],
     ["cursor",           [".cursor"]],
     ["vscode-copilot",   [".vscode"]],
+    ["copilot-cli",      [".copilot"]],
     ["kiro",             [".kiro"]],
     ["pi",               [".pi"]],
     ["omp",              [".omp"]],
@@ -1667,10 +1669,12 @@ export const adapterLabels: Record<string, string> = {
   "claude-code":       "Claude Code",
   "gemini-cli":        "Gemini CLI",
   "antigravity":       "Antigravity",
+  "antigravity-cli":   "Antigravity CLI",
   "openclaw":          "Openclaw",
   "codex":             "Codex CLI",
   "cursor":            "Cursor",
   "vscode-copilot":    "VS Code Copilot",
+  "copilot-cli":       "GitHub Copilot CLI",
   "kiro":              "Kiro",
   "pi":                "Pi",
   "omp":               "OMP",

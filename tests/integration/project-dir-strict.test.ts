@@ -67,6 +67,8 @@ describe("server getProjectDir wiring — strictPlatform for all adapters (issue
     "kiro",
     "zed",
     "antigravity",
+    "antigravity-cli",
+    "copilot-cli",
     "openclaw",
   ];
 

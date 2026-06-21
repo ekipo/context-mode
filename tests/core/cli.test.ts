@@ -12,11 +12,37 @@ import { readFileSync, existsSync, accessSync, constants, mkdirSync, writeFileSy
 import { resolve, join, dirname, sep } from "node:path";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { execSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
 import { toUnixPath } from "../../src/cli.js";
 import { findMissingLaunchFiles } from "../../src/util/plugin-cache-integrity.js";
 
 const ROOT = resolve(import.meta.dirname, "../..");
+
+describe("hook dispatch fails OPEN on a missing hook (version-skew brick fix)", () => {
+  // A non-zero exit + empty stdout makes GitHub Copilot CLI DENY the tool
+  // ("Denied by preToolUse hook (hook errored)"), bricking the agent when a
+  // newer adapter's hook command runs against an older global that predates it.
+  // context-mode has no hook for an unknown platform/event, so it MUST exit 0
+  // (allow). Locks src/cli.ts hookDispatch's missing-script branch.
+  const CLI = resolve(ROOT, "cli.bundle.mjs");
+
+  it("exits 0 for an unknown platform (does not block the host's tool)", () => {
+    const r = spawnSync("node", [CLI, "hook", "__no_such_platform__", "pretooluse"], {
+      input: "{}",
+      encoding: "utf-8",
+    });
+    expect(r.status).toBe(0);
+  });
+
+  it("exits 0 for a known platform with an unmapped event", () => {
+    // antigravity-cli maps PreToolUse/PostToolUse/Stop, but not PreCompact.
+    const r = spawnSync("node", [CLI, "hook", "antigravity-cli", "precompact"], {
+      input: "{}",
+      encoding: "utf-8",
+    });
+    expect(r.status).toBe(0);
+  });
+});
 
 // ── cli.bundle.mjs — marketplace install support ──────────────────────
 

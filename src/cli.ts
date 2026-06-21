@@ -121,6 +121,22 @@ const HOOK_MAP: Record<string, Record<string, string>> = {
     precompact: "hooks/jetbrains-copilot/precompact.mjs",
     sessionstart: "hooks/jetbrains-copilot/sessionstart.mjs",
   },
+  "copilot-cli": {
+    pretooluse: "hooks/copilot-cli/pretooluse.mjs",
+    posttooluse: "hooks/copilot-cli/posttooluse.mjs",
+    precompact: "hooks/copilot-cli/precompact.mjs",
+    sessionstart: "hooks/copilot-cli/sessionstart.mjs",
+    userpromptsubmit: "hooks/copilot-cli/userpromptsubmit.mjs",
+    stop: "hooks/copilot-cli/stop.mjs",
+  },
+  // Antigravity CLI (`agy`) — bounded PreToolUse enforcement plus capture-only
+  // PostToolUse/Stop hooks. Configured via an installed agy plugin's
+  // hooks/hooks.json or ~/.gemini/config/hooks.json.
+  "antigravity-cli": {
+    pretooluse: "hooks/antigravity-cli/pretooluse.mjs",
+    posttooluse: "hooks/antigravity-cli/posttooluse.mjs",
+    stop: "hooks/antigravity-cli/stop.mjs",
+  },
   "kimi": {
     pretooluse: "hooks/kimi/pretooluse.mjs",
     posttooluse: "hooks/kimi/posttooluse.mjs",
@@ -153,7 +169,16 @@ async function hookDispatch(platform: string, event: string): Promise<void> {
 
   const scriptPath = HOOK_MAP[platform]?.[event];
   if (!scriptPath) {
-    process.exit(1);
+    // Fail OPEN. context-mode has no hook for this platform/event — most often
+    // because a newer adapter's hook command (`context-mode hook copilot-cli …`)
+    // is running against an OLDER global binary that predates that adapter
+    // (version skew). Exit 0 (no decision) so the host ALLOWS the tool. Exiting
+    // non-zero here makes some hosts treat it as a hook ERROR and DENY the tool:
+    // verified against GitHub Copilot CLI 1.0.59, where an exit-1 + empty-stdout
+    // PreToolUse hook blocks EVERY tool ("Denied by preToolUse hook (hook
+    // errored)") — bricking the agent during a skew instead of just disabling
+    // context-mode's instrumentation.
+    process.exit(0);
   }
   const pluginRoot = getPluginRoot();
   await import(pathToFileURL(join(pluginRoot, scriptPath)).href);

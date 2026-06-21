@@ -477,6 +477,14 @@ const TOOL_ALIASES = {
   "grep_search": "Grep",
   "search_file_content": "Grep",
   "web_fetch": "WebFetch",
+  "read_url_content": "WebFetch",
+  // Antigravity CLI (`agy`) native tool names. Keep in sync with the two other
+  // agy maps: hooks/antigravity-cli/payload.mjs (normalizeAgyToolName) and
+  // src/session/extract.ts (TOOL_NAME_NORMALIZE).
+  "run_command": "Bash",
+  "view_file": "Read",
+  "list_dir": "LS",
+  "search_web": "WebSearch",
   // Qwen Code additional tool names (no routing branch yet but normalized
   // so future routing logic works without per-platform fallback):
   "write_file": "Write",
@@ -581,6 +589,24 @@ function getShellCommand(toolInput) {
   if (!toolInput || typeof toolInput !== "object") return "";
   if (typeof toolInput.command === "string") return toolInput.command;
   if (typeof toolInput.cmd === "string") return toolInput.cmd;
+  if (typeof toolInput.CommandLine === "string") return toolInput.CommandLine;
+  return "";
+}
+
+function getReadFilePath(toolInput) {
+  if (!toolInput || typeof toolInput !== "object") return "";
+  if (typeof toolInput.file_path === "string") return toolInput.file_path;
+  if (typeof toolInput.path === "string") return toolInput.path;
+  if (typeof toolInput.AbsolutePath === "string") return toolInput.AbsolutePath;
+  if (typeof toolInput.FilePath === "string") return toolInput.FilePath;
+  return "";
+}
+
+function getWebFetchUrl(toolInput) {
+  if (!toolInput || typeof toolInput !== "object") return "";
+  if (typeof toolInput.url === "string") return toolInput.url;
+  if (typeof toolInput.URL === "string") return toolInput.URL;
+  if (typeof toolInput.Url === "string") return toolInput.Url;
   return "";
 }
 
@@ -778,7 +804,7 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform, sessi
   // event with the actual file size as bytes_avoided. Threshold = 50 000 bytes;
   // smaller reads stay on the existing one-shot guidance nudge.
   if (canonical === "Read") {
-    const filePath = toolInput.file_path ?? toolInput.path ?? "";
+    const filePath = getReadFilePath(toolInput);
     if (filePath) {
       try {
         const st = statSync(filePath);
@@ -805,7 +831,7 @@ export function routePreToolUse(toolName, toolInput, projectDir, platform, sessi
 
   // ─── WebFetch: deny + redirect to sandbox ───
   if (canonical === "WebFetch") {
-    const url = toolInput.url ?? "";
+    const url = getWebFetchUrl(toolInput);
     return mcpRedirect({
       action: "deny",
       reason: `context-mode: WebFetch redirected. Call ${t("ctx_fetch_and_index")}(url: "${url}", source: "...") to fetch + index the page, then ${t("ctx_search")}(queries: [...]) to query the indexed content — the raw page bytes stay in storage instead of entering your conversation. Or call ${t("ctx_execute")}(language, code) when you want to derive your answer in one round trip (parse, extract, count) without persisting the response. Both have full network access. Retry the same call on a transient DNS error (EAI_AGAIN, ETIMEDOUT, ENETUNREACH).`,

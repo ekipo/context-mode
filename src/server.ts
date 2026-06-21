@@ -340,6 +340,68 @@ server.server.setRequestHandler(ListPromptsRequestSchema, async () => ({ prompts
 server.server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: [] }));
 server.server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: [] }));
 
+// ── Strict-client (Gemini function-calling) schema compatibility ──────────────
+// Gemini's function-calling API — used by Antigravity CLI (`agy`) and Gemini CLI
+// — rejects JSON Schema `const` and `additionalProperties`. A rejected parameter
+// schema makes the host SILENTLY DROP that tool from the model's function list,
+// so the agent never sees our ctx_* tools and falls back to hand-rolling the MCP
+// protocol through its Bash tool. Sanitize the EMITTED tools/list schema:
+//   • `const: X`  →  `enum: [X]`   — an identical single-value constraint
+//   • drop `additionalProperties`  — advisory only; every ctx_* handler parses
+//     args with Zod (which strips unknown keys server-side), so removing it
+//     changes no validation and no call behavior.
+// Both transforms are behavior-preserving for every other client (Claude Code,
+// Copilot, Cursor, …): `const` and a one-value `enum` are equivalent, and no
+// model sends undeclared properties. Only the wire schema changes — never
+// validation or how any tool is invoked.
+export function sanitizeSchemaForStrictClients(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(sanitizeSchemaForStrictClients);
+  if (node === null || typeof node !== "object") return node;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+    if (key === "additionalProperties") continue;
+    if (key === "const") {
+      out.enum = [value];
+      continue;
+    }
+    out[key] = sanitizeSchemaForStrictClients(value);
+  }
+  return out;
+}
+
+// Wrap the SDK-installed tools/list handler so its generated schemas pass through
+// the sanitizer above. Best-effort by design: if the MCP SDK's internals shift,
+// the original handler is left untouched (no regression — strict clients stay as
+// they were, every other client unaffected). Must run AFTER all registerTool()
+// calls so the SDK's default tools/list handler already exists.
+export function installStrictClientSchemaCompat(target: McpServer = server): void {
+  try {
+    const low = target.server as unknown as {
+      _requestHandlers?: Map<string, (req: unknown, extra: unknown) => Promise<unknown>>;
+    };
+    const original = low._requestHandlers?.get("tools/list");
+    if (typeof original !== "function") return;
+    target.server.setRequestHandler(ListToolsRequestSchema, async (req, extra) => {
+      const result = (await original(req as unknown, extra as unknown)) as
+        | { tools?: Array<{ inputSchema?: unknown }> }
+        | undefined;
+      if (result && Array.isArray(result.tools)) {
+        for (const tool of result.tools) {
+          if (!tool || tool.inputSchema == null) continue;
+          try {
+            tool.inputSchema = sanitizeSchemaForStrictClients(tool.inputSchema);
+          } catch {
+            /* leave this tool's schema unchanged */
+          }
+        }
+      }
+      return result as never;
+    });
+  } catch {
+    /* best-effort — never break tools/list */
+  }
+}
+
 const executor = new PolyglotExecutor({
   runtimes,
   projectRoot: () => getProjectDir(),
@@ -1350,6 +1412,25 @@ function truncateCommandForEcho(command: string): string {
 }
 
 /**
+ * Default execution timeout (ms) applied ONLY under Antigravity CLI (`agy`).
+ * agy does not enforce an MCP RPC timeout, so a ctx_execute with a runaway or
+ * blocking script hangs forever — the host never kills it and the user must
+ * interrupt. Every other host enforces its own RPC timeout, so we keep the
+ * no-server-timer behavior there (Issue #406 — long builds need an unbounded
+ * run). A caller can still pass an explicit `timeout` to override on any host.
+ */
+export const AGY_DEFAULT_EXEC_TIMEOUT_MS = 120_000;
+export function resolveExecTimeout(timeout: number | undefined): number | undefined {
+  if (timeout !== undefined) return timeout;
+  // Only agy gets a default — every other host enforces its own RPC timeout, so
+  // keep the unbounded behavior there. Detected via the env the agy bundle pins
+  // (CONTEXT_MODE_PLATFORM=antigravity-cli). Tunable via CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS.
+  if (detectPlatform().platform !== "antigravity-cli") return undefined;
+  const override = Number(process.env.CONTEXT_MODE_AGY_EXEC_TIMEOUT_MS);
+  return Number.isFinite(override) && override > 0 ? override : AGY_DEFAULT_EXEC_TIMEOUT_MS;
+}
+
+/**
  * Per-call budget for the source-code echo prepended by `ctx_execute` and
  * `ctx_execute_file` (Issues #717 + #736). The full code always reaches the
  * sandbox — only the echo is clipped so massive payloads don't dominate
@@ -1657,7 +1738,8 @@ ${code}
 __cm_main().catch(e=>{console.error(e);process.exitCode=1});${background ? '\nsetInterval(()=>{},2147483647);' : ''}
 })(typeof require!=='undefined'?require:null);`;
       }
-      const result = await executor.execute({ language, code: instrumentedCode, timeout, background, cwd });
+      const effTimeout = resolveExecTimeout(timeout);
+      const result = await executor.execute({ language, code: instrumentedCode, timeout: effTimeout, background, cwd });
 
       // Echo the executed source code before stdout so users can audit
       // and tooling can block command patterns (Issues #717 + #736).
@@ -1687,7 +1769,7 @@ __cm_main().catch(e=>{console.error(e);process.exitCode=1});${background ? '\nse
             content: [
               {
                 type: "text" as const,
-                text: `${echo}${partialOutput}\n\n_(process backgrounded after ${timeout}ms — still running)_`,
+                text: `${echo}${partialOutput}\n\n_(process backgrounded after ${effTimeout}ms — still running)_`,
               },
             ],
           });
@@ -1698,7 +1780,7 @@ __cm_main().catch(e=>{console.error(e);process.exitCode=1});${background ? '\nse
             content: [
               {
                 type: "text" as const,
-                text: `${echo}${partialOutput}\n\n_(timed out after ${timeout}ms — partial output shown above)_`,
+                text: `${echo}${partialOutput}\n\n_(timed out after ${effTimeout}ms — partial output shown above)_`,
               },
             ],
           });
@@ -1707,7 +1789,7 @@ __cm_main().catch(e=>{console.error(e);process.exitCode=1});${background ? '\nse
           content: [
             {
               type: "text" as const,
-              text: `${echo}Execution timed out after ${timeout}ms\n\nstderr:\n${result.stderr}`,
+              text: `${echo}Execution timed out after ${effTimeout}ms\n\nstderr:\n${result.stderr}`,
             },
           ],
           isError: true,
@@ -1954,11 +2036,12 @@ EXAMPLE: ctx_execute_file(path: "data.csv", language: "javascript", code: "const
     }
 
     try {
+      const effTimeout = resolveExecTimeout(timeout);
       const result = await executor.executeFile({
         path,
         language,
         code,
-        timeout,
+        timeout: effTimeout,
       });
 
       // Echo path + executed source code before stdout for audit/debug
@@ -1970,7 +2053,7 @@ EXAMPLE: ctx_execute_file(path: "data.csv", language: "javascript", code: "const
           content: [
             {
               type: "text" as const,
-              text: `${echo}Timed out processing ${path} after ${timeout}ms`,
+              text: `${echo}Timed out processing ${path} after ${effTimeout}ms`,
             },
           ],
           isError: true,
@@ -3561,10 +3644,11 @@ EXAMPLE: ctx_batch_execute(
 
       // Full stdout is preserved per-command and indexed into FTS5 (Issue #61, #197).
       // Concurrency>1 switches to a worker pool with per-command timeouts.
+      const effTimeout = resolveExecTimeout(timeout);
       const { outputs: perCommandOutputs, timedOut } = await runBatchCommands(
         commands,
         {
-          timeout,
+          timeout: effTimeout,
           concurrency,
           nodeOptsPrefix,
           cwd,
@@ -3582,7 +3666,7 @@ EXAMPLE: ctx_batch_execute(
           content: [
             {
               type: "text" as const,
-              text: `Batch timed out after ${timeout}ms. No output captured.`,
+              text: `Batch timed out after ${effTimeout}ms. No output captured.`,
             },
           ],
           isError: true,
@@ -4677,6 +4761,11 @@ async function main() {
     }
   }
 }
+
+// Runs after every registerTool() above, so the SDK's default tools/list handler
+// exists and can be wrapped. Makes ctx_* schemas safe for strict (Gemini
+// function-calling) clients like Antigravity CLI (`agy`) / Gemini CLI.
+installStrictClientSchemaCompat();
 
 if (process.env.CONTEXT_MODE_EMBEDDED_PLUGIN_TOOLS !== "1") {
   main().catch((err) => {

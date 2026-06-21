@@ -339,10 +339,12 @@ export function getSessionDirSegments(platform: string): string[] | null {
     case "claude-code":      return [".claude"];
     case "gemini-cli":       return [".gemini"];
     case "antigravity":      return [".gemini"];
+    case "antigravity-cli":  return [".gemini"];
     case "openclaw":         return [".openclaw"];
     case "codex":            return [".codex"];
     case "cursor":           return [".cursor"];
     case "vscode-copilot":   return [".vscode"];
+    case "copilot-cli":      return [".copilot"];
     case "kiro":             return [".kiro"];
     case "pi":               return [".pi"];
     case "omp":              return [".omp"];
@@ -388,7 +390,7 @@ export function detectPlatform(clientInfo?: { name: string; version?: string }):
   if (platformOverride) {
     const validPlatforms: PlatformId[] = [
       "claude-code", "gemini-cli", "kilo", "opencode", "codex",
-      "vscode-copilot", "jetbrains-copilot", "cursor", "antigravity", "kiro", "pi", "omp", "zed", "qwen-code", "kimi",
+      "vscode-copilot", "jetbrains-copilot", "copilot-cli", "cursor", "antigravity", "antigravity-cli", "kiro", "pi", "omp", "zed", "qwen-code", "kimi",
     ];
     if (validPlatforms.includes(platformOverride as PlatformId)) {
       return {
@@ -431,6 +433,70 @@ export function detectPlatform(clientInfo?: { name: string; version?: string }):
   // ── Medium confidence: config directory existence ──────
 
   const home = homedir();
+
+  // Issue #774 — dedicated CLI agents (Antigravity CLI `agy`, GitHub Copilot
+  // CLI) MUST be probed BEFORE the generic ~/.claude and ~/.gemini fallbacks.
+  // A user migrating from gemini-cli to `agy` keeps ~/.claude AND ~/.gemini, so
+  // the ~/.claude check below otherwise wins and `context-mode doctor`
+  // mis-detected `agy` as Claude Code — pointing storage at ~/.claude and
+  // reporting the wrong platform (reproduced in #774).
+  //
+  // Regression guard (whole-branch detection-ordering review): these markers
+  // are deliberately narrow so they cannot relocate an existing Claude Code
+  // user's storage from a bare shell. The antigravity-cli markers are either
+  // agy-exclusive (`~/.local/bin/agy`, `~/.gemini/antigravity-cli`) or map to
+  // the SAME `~/.gemini` root as gemini-cli (so a mis-detect is storage-neutral
+  // and never collides with `~/.gemini/settings.json` (gemini-cli) or
+  // `~/.gemini/antigravity/` (Antigravity IDE)). The copilot-cli marker is
+  // gated on a context-mode-written file (NOT a bare `~/.copilot/` directory),
+  // so a Claude Code user who merely co-installed GitHub Copilot CLI — but has
+  // not configured context-mode for it — is NOT pulled away from ~/.claude.
+  // GitHub Copilot CLI's config root is relocatable via COPILOT_HOME (the
+  // documented relocation env, incl. on Windows), so the marker must honor it —
+  // not just ~/.copilot. Mirrors copilotCliHome() in copilot-cli/index.ts.
+  const copilotHome = (() => {
+    const raw = process.env.COPILOT_HOME;
+    if (raw && raw.trim() !== "") {
+      return raw.startsWith("~") ? resolve(home, raw.replace(/^~[/\\]?/, "")) : resolve(raw);
+    }
+    return resolve(home, ".copilot");
+  })();
+  const copilotConfigured =
+    existsSync(resolve(copilotHome, "mcp-config.json")) ||
+    existsSync(resolve(copilotHome, "hooks", "context-mode.json"));
+
+  // A non-empty COPILOT_HOME is an explicit user/session selection, not a
+  // passive co-install marker. Respect it before agy's global markers so a
+  // Copilot doctor run in an isolated COPILOT_HOME is not stolen by an
+  // unrelated ~/.local/bin/agy or ~/.gemini/config/mcp_config.json.
+  if (process.env.COPILOT_HOME?.trim() && copilotConfigured) {
+    return {
+      platform: "copilot-cli",
+      confidence: "medium",
+      reason: "context-mode config in explicit COPILOT_HOME exists (mcp-config.json or hooks/context-mode.json)",
+    };
+  }
+
+  if (
+    existsSync(resolve(home, ".local", "bin", "agy")) ||
+    existsSync(resolve(home, ".gemini", "antigravity-cli")) ||
+    existsSync(resolve(home, ".gemini", "config", "mcp_config.json"))
+  ) {
+    return {
+      platform: "antigravity-cli",
+      confidence: "medium",
+      reason:
+        "Antigravity CLI marker exists (~/.local/bin/agy, ~/.gemini/antigravity-cli, or ~/.gemini/config/mcp_config.json)",
+    };
+  }
+
+  if (copilotConfigured) {
+    return {
+      platform: "copilot-cli",
+      confidence: "medium",
+      reason: "context-mode config in Copilot CLI home exists (mcp-config.json or hooks/context-mode.json; honors COPILOT_HOME)",
+    };
+  }
 
   if (existsSync(resolve(home, ".claude"))) {
     return {
@@ -608,6 +674,11 @@ export async function getAdapter(platform?: PlatformId): Promise<HookAdapter> {
       return new JetBrainsCopilotAdapter();
     }
 
+    case "copilot-cli": {
+      const { CopilotCliAdapter } = await import("./copilot-cli/index.js");
+      return new CopilotCliAdapter();
+    }
+
     case "cursor": {
       const { CursorAdapter } = await import("./cursor/index.js");
       return new CursorAdapter();
@@ -616,6 +687,11 @@ export async function getAdapter(platform?: PlatformId): Promise<HookAdapter> {
     case "antigravity": {
       const { AntigravityAdapter } = await import("./antigravity/index.js");
       return new AntigravityAdapter();
+    }
+
+    case "antigravity-cli": {
+      const { AntigravityCliAdapter } = await import("./antigravity-cli/index.js");
+      return new AntigravityCliAdapter();
     }
 
     case "kiro": {

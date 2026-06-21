@@ -1890,6 +1890,14 @@ const TOOL_NAME_NORMALIZE: Record<string, string> = {
   "container.exec": "Bash",
   local_shell: "Bash",
   grep_files: "Grep",
+  // Antigravity CLI (`agy`) native names. Keep in sync with the two other agy
+  // maps: hooks/antigravity-cli/payload.mjs (normalizeAgyToolName) and
+  // hooks/core/routing.mjs (TOOL_ALIASES).
+  run_command: "Bash",
+  view_file: "Read",
+  read_url_content: "WebFetch",
+  list_dir: "LS",
+  search_web: "WebSearch",
 };
 
 function normalizeHookInput(input: HookInput): HookInput {

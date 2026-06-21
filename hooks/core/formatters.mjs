@@ -105,6 +105,29 @@ export const formatters = {
     }),
   },
 
+  // GitHub Copilot CLI uses top-level decision fields (NOT the VS Code
+  // hookSpecificOutput wrapper) — matches CopilotCliAdapter.format*Response.
+  "copilot-cli": {
+    deny: (reason) => ({
+      permissionDecision: "deny",
+      permissionDecisionReason: reason,
+    }),
+    // Carry the reason on `ask` too, so the user sees WHY confirmation is
+    // requested (Copilot CLI honors permissionDecisionReason; matches the
+    // adapter's formatPreToolUseResponse ask branch). Fall back when the
+    // routing decision carries no reason, so the prompt is never bare.
+    ask: (reason) => ({
+      permissionDecision: "ask",
+      permissionDecisionReason: reason ?? "Action requires user confirmation",
+    }),
+    modify: (updatedInput) => ({
+      modifiedArgs: updatedInput,
+    }),
+    context: (additionalContext) => ({
+      additionalContext,
+    }),
+  },
+
   "jetbrains-copilot": {
     deny: (reason) => ({
       permissionDecision: "deny",
@@ -168,6 +191,36 @@ export const formatters = {
     context: () => null, // Kimi HookResult has no additionalContext field
   },
 
+  "antigravity-cli": {
+    // agy PreToolUse accepts the Claude-compatible top-level decision shape.
+    // agy 1.0.6 does NOT honor PreToolUse additionalContext (verified by
+    // transcript probe), so context guidance must become an enforceable deny
+    // or it disappears and the native tool runs unchanged.
+    deny: (reason) => ({ decision: "deny", reason }),
+    // Carry a fallback reason on `ask` so a security-policy ask (routing emits
+    // {action:"ask"} with no reason) never shows a bare, unexplained prompt.
+    ask: (reason) => ({ decision: "ask", reason: reason ?? "Action requires user confirmation" }),
+    // agy cannot modify tool args, so a routing `modify` becomes a deny. Surface
+    // the per-tool redirect guidance routing carried in `updatedInput.command`
+    // (an `echo "<guidance>"` payload that already uses agy's context-mode/<tool>
+    // surface) instead of a generic line; fall back to the generic redirect.
+    modify: (updatedInput) => {
+      const cmd = updatedInput?.command ?? updatedInput?.CommandLine ?? "";
+      const m = String(cmd).match(/^echo\s+"([\s\S]*)"\s*$/);
+      const guidance = m ? m[1].replace(/\\(["\\])/g, "$1") : "";
+      return {
+        decision: "deny",
+        reason:
+          guidance ||
+          "context-mode: redirected. Use the context-mode MCP tools (ctx_execute / ctx_fetch_and_index / ctx_search) so raw bytes stay out of the conversation.",
+      };
+    },
+    context: (additionalContext) => ({
+      decision: "deny",
+      reason: agyContextReason(additionalContext),
+    }),
+  },
+
   "cursor": {
     deny: (reason) => ({
       permission: "deny",
@@ -185,6 +238,20 @@ export const formatters = {
   },
 };
 
+// Keep in sync with the identical agyContextReason in
+// src/adapters/antigravity-cli/index.ts: this bundled .mjs formatter (runtime
+// hook path) and the TS adapter are separate layers; the text must not drift.
+function agyContextReason(additionalContext) {
+  const text = String(additionalContext ?? "")
+    .replace(/<\/?context_guidance>/g, " ")
+    .replace(/<\/?tip>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text
+    ? `context-mode: use the context-mode MCP tools instead of this native tool. ${text}`
+    : "context-mode: use the context-mode MCP tools instead of this native tool so raw bytes stay out of the conversation.";
+}
+
 /**
  * Apply a formatter to a normalized routing decision.
  * Returns the platform-specific JSON response, or null for passthrough.
@@ -197,7 +264,9 @@ export function formatDecision(platform, decision) {
 
   switch (decision.action) {
     case "deny": return fmt.deny(decision.reason);
-    case "ask": return fmt.ask();
+    // Pass the reason to ask() too — platforms whose ask formatter ignores it
+    // (legacy `ask: () => …`) are unaffected; copilot-cli surfaces it.
+    case "ask": return fmt.ask(decision.reason);
     case "modify": return fmt.modify(decision.updatedInput);
     case "context": return fmt.context(decision.additionalContext);
     default: return null;
