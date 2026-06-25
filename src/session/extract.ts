@@ -1535,6 +1535,103 @@ function extractAgentUsage(input: HookInput): SessionEvent[] {
   return [event];
 }
 
+/**
+ * Build a structured `agent_usage` event from summed per-model token counts.
+ * Emits the colon-string `data` (human/debug + back-compat) AND the structured
+ * top-level fields the forward envelope spreads to the platform. cost_usd via
+ * the pricing catalog — omitted on a price miss. Returns null when every token
+ * bucket is zero/absent (so an all-zero model emits no event).
+ */
+function buildAgentUsageEvent(counts: {
+  model_id: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+}): SessionEvent | null {
+  const { model_id, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens } = counts;
+  if (input_tokens <= 0 && output_tokens <= 0 && cache_creation_tokens <= 0 && cache_read_tokens <= 0) {
+    return null;
+  }
+
+  const parts: string[] = [`tokens_in:${input_tokens}`, `tokens_out:${output_tokens}`];
+  if (cache_creation_tokens > 0) parts.push(`cache_create:${cache_creation_tokens}`);
+  if (cache_read_tokens > 0) parts.push(`cache_read:${cache_read_tokens}`);
+
+  const cost = computeTurnCostUsd(model_id, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens);
+  if (cost !== null) parts.push(`cost_usd:${formatCostUsd(cost)}`);
+
+  const event: SessionEvent = {
+    type: "agent_usage",
+    category: "cost",
+    data: safeString(parts.join(" ")),
+    priority: 2,
+  };
+  if (model_id.length > 0) event.model_id = model_id;
+  event.input_tokens = input_tokens;
+  event.output_tokens = output_tokens;
+  if (cache_read_tokens > 0) event.cache_read_tokens = cache_read_tokens;
+  if (cache_creation_tokens > 0) event.cache_creation_tokens = cache_creation_tokens;
+  if (cost !== null) event.cost_usd = cost;
+  return event;
+}
+
+/**
+ * claude-code MAIN-turn usage capture — the dominant-spend path the Task
+ * subagent capture (extractAgentUsage) misses. Parses the session transcript
+ * JSONL char-algorithmically (NO regex): each `type:"assistant"` line carries
+ * `message.usage` + `message.model`, and usage is a per-turn DELTA, so summing
+ * the assistant turns per model = the exact billed total. `isSidechain:true`
+ * lines are Task-subagent sidechains written to a SEPARATE transcript (refs:
+ * sessionStorage.ts:1042) — excluding them keeps the main-turn sum from
+ * double-counting the separate Task-subagent capture. Emits one structured
+ * `agent_usage` event per distinct model.
+ */
+export function extractTranscriptUsage(transcript: string): SessionEvent[] {
+  if (typeof transcript !== "string" || transcript.length === 0) return [];
+  const sums = new Map<string, { input: number; output: number; cacheCreate: number; cacheRead: number }>();
+  let start = 0;
+  for (let i = 0; i <= transcript.length; i++) {
+    if (i !== transcript.length && transcript.charCodeAt(i) !== 10 /* \n */) continue;
+    const line = transcript.slice(start, i).trim();
+    start = i + 1;
+    if (line.length === 0) continue;
+    let obj: Record<string, unknown>;
+    try {
+      const p = JSON.parse(line);
+      if (!p || typeof p !== "object") continue;
+      obj = p as Record<string, unknown>;
+    } catch { continue; }
+    if (obj.type !== "assistant" || obj.isSidechain === true) continue;
+    const msg = obj.message;
+    if (!msg || typeof msg !== "object") continue;
+    const m = msg as Record<string, unknown>;
+    const model = typeof m.model === "string" ? m.model : "";
+    if (model.length === 0) continue;
+    const u = m.usage;
+    if (!u || typeof u !== "object") continue;
+    const usage = u as Record<string, unknown>;
+    const cur = sums.get(model) ?? { input: 0, output: 0, cacheCreate: 0, cacheRead: 0 };
+    if (typeof usage.input_tokens === "number") cur.input += usage.input_tokens;
+    if (typeof usage.output_tokens === "number") cur.output += usage.output_tokens;
+    if (typeof usage.cache_creation_input_tokens === "number") cur.cacheCreate += usage.cache_creation_input_tokens;
+    if (typeof usage.cache_read_input_tokens === "number") cur.cacheRead += usage.cache_read_input_tokens;
+    sums.set(model, cur);
+  }
+  const events: SessionEvent[] = [];
+  for (const [model, s] of sums) {
+    const ev = buildAgentUsageEvent({
+      model_id: model,
+      input_tokens: s.input,
+      output_tokens: s.output,
+      cache_creation_tokens: s.cacheCreate,
+      cache_read_tokens: s.cacheRead,
+    });
+    if (ev) events.push(ev);
+  }
+  return events;
+}
+
 // ── User-message extractors ────────────────────────────────────────────────
 
 /**
